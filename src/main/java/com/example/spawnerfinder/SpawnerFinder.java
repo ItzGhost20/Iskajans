@@ -4,5 +4,7 @@ import net.minecraftforge.fml.common.Mod;
 
 @Mod("spawnerfinder")
 public class SpawnerFinder {
-    public SpawnerFinder() {}
+    public SpawnerFinder() {
+        Settings.load();
+    }
 }

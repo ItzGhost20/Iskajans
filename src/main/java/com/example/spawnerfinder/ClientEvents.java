@@ -1,17 +1,20 @@
 package com.example.spawnerfinder;
 
-import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vertex.*;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.npc.Villager;
+import net.minecraft.world.entity.npc.WanderingTrader;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.SpawnerBlockEntity;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.AABB;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
@@ -19,40 +22,43 @@ import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
-import org.joml.Matrix4f;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.TreeSet;
 
 @Mod.EventBusSubscriber(modid = "spawnerfinder", value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class ClientEvents {
 
-    record Found(BlockPos pos, String type) {}
+    public record Found(BlockPos pos, String type) {}
 
-    static boolean enabled = true;
     static List<Found> found = new ArrayList<>();
     static int tickCounter = 0;
 
-    @SubscribeEvent
-    public static void onTick(TickEvent.ClientTickEvent e) {
-        if (e.phase != TickEvent.Phase.END) return;
-        Minecraft mc = Minecraft.getInstance();
+    // ================= Spawner finder =================
 
-        while (KeyBinds.TOGGLE.consumeClick()) {
-            enabled = !enabled;
-            if (mc.player != null) {
-                mc.player.displayClientMessage(
-                        Component.literal("Spawner ESP: " + (enabled ? "ON" : "OFF")), true);
-            }
+    public static List<String> spawnerTypes() {
+        return new ArrayList<>(new TreeSet<>(found.stream().map(Found::type).toList()));
+    }
+
+    public static List<Target> spawnerTargets(Minecraft mc) {
+        List<Target> out = new ArrayList<>();
+        if (mc.player == null) return out;
+        Settings.Module cfg = Settings.spawner;
+        double r2 = (double) cfg.range * cfg.range;
+        for (Found f : found) {
+            if (!cfg.filter.equals("ALL") && !f.type().equals(cfg.filter)) continue;
+            double d2 = f.pos().distSqr(mc.player.blockPosition());
+            if (d2 > r2) continue;
+            double d = Math.sqrt(d2);
+            out.add(new Target(new AABB(f.pos()), f.type(), f.type() + " " + (int) d + "m", d));
         }
+        out.sort(Comparator.comparingDouble(Target::dist));
+        return out;
+    }
 
-        if (!enabled || mc.level == null || mc.player == null) {
-            found = new ArrayList<>();
-            return;
-        }
-        if (++tickCounter % 20 != 0) return;
-
+    private static void scanSpawners(Minecraft mc) {
         List<Found> list = new ArrayList<>();
         int r = mc.options.getEffectiveRenderDistance();
         int pcx = mc.player.chunkPosition().x;
@@ -78,85 +84,123 @@ public class ClientEvents {
         found = list;
     }
 
+    // ================= Villager finder =================
+
+    private static String villagerType(Entity en) {
+        if (en instanceof Villager v) {
+            var key = BuiltInRegistries.VILLAGER_PROFESSION.getKey(v.getVillagerData().getProfession());
+            return key == null ? "villager" : key.getPath();
+        }
+        if (en instanceof WanderingTrader) return "wandering_trader";
+        return null;
+    }
+
+    public static List<String> villagerTypes(Minecraft mc) {
+        TreeSet<String> set = new TreeSet<>();
+        if (mc.level == null) return new ArrayList<>();
+        for (Entity en : mc.level.entitiesForRendering()) {
+            String t = villagerType(en);
+            if (t != null) set.add(t);
+        }
+        return new ArrayList<>(set);
+    }
+
+    public static List<Target> villagerTargets(Minecraft mc, float pt) {
+        List<Target> out = new ArrayList<>();
+        if (mc.level == null || mc.player == null) return out;
+        Settings.Module cfg = Settings.villager;
+
+        for (Entity en : mc.level.entitiesForRendering()) {
+            String type = villagerType(en);
+            if (type == null) continue;
+            if (!cfg.filter.equals("ALL") && !type.equals(cfg.filter)) continue;
+
+            double x = Mth.lerp(pt, en.xOld, en.getX());
+            double y = Mth.lerp(pt, en.yOld, en.getY());
+            double z = Mth.lerp(pt, en.zOld, en.getZ());
+            AABB b = en.getBoundingBox().move(x - en.getX(), y - en.getY(), z - en.getZ());
+
+            double d = mc.player.position().distanceTo(b.getCenter());
+            if (d > cfg.range) continue;
+
+            String name = type;
+            if (en instanceof Villager v) {
+                name = type + " L" + v.getVillagerData().getLevel();
+            }
+            out.add(new Target(b, type, name + " " + (int) d + "m", d));
+        }
+        out.sort(Comparator.comparingDouble(Target::dist));
+        return out;
+    }
+
+    // ================= Events =================
+
     @SubscribeEvent
-    public static void onRender(RenderLevelStageEvent e) {
-        if (!enabled || found.isEmpty()) return;
-        if (e.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
+    public static void onTick(TickEvent.ClientTickEvent e) {
+        if (e.phase != TickEvent.Phase.END) return;
+        Minecraft mc = Minecraft.getInstance();
 
-        Vec3 cam = e.getCamera().getPosition();
-        Matrix4f m = e.getPoseStack().last().pose();
-
-        RenderSystem.disableDepthTest();
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.setShader(GameRenderer::getPositionColorShader);
-        RenderSystem.lineWidth(3f);
-
-        BufferBuilder bb = Tesselator.getInstance().getBuilder();
-        bb.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
-
-        for (Found f : found) {
-            int h = f.type().hashCode();
-            float r = Math.max(0.35f, ((h >> 16) & 0xFF) / 255f);
-            float g = Math.max(0.35f, ((h >> 8) & 0xFF) / 255f);
-            float b = Math.max(0.35f, (h & 0xFF) / 255f);
-
-            float x0 = (float) (f.pos().getX() - cam.x);
-            float y0 = (float) (f.pos().getY() - cam.y);
-            float z0 = (float) (f.pos().getZ() - cam.z);
-            box(bb, m, x0, y0, z0, x0 + 1, y0 + 1, z0 + 1, r, g, b);
+        while (KeyBinds.TOGGLE.consumeClick()) {
+            Settings.master = !Settings.master;
+            Settings.save();
+            if (mc.player != null) {
+                mc.player.displayClientMessage(
+                        Component.literal("Client: " + (Settings.master ? "ON" : "OFF")), true);
+            }
+        }
+        while (KeyBinds.GUI.consumeClick()) {
+            if (mc.screen == null && mc.player != null) mc.setScreen(new ControlPanel());
         }
 
-        Tesselator.getInstance().end();
-        RenderSystem.lineWidth(1f);
-        RenderSystem.enableDepthTest();
+        if (!Settings.master || !Settings.spawner.enabled || mc.level == null || mc.player == null) {
+            if (!found.isEmpty()) found = new ArrayList<>();
+            return;
+        }
+        if (++tickCounter % 20 != 0) return;
+        scanSpawners(mc);
+    }
+
+    @SubscribeEvent
+    public static void onRender(RenderLevelStageEvent e) {
+        if (!Settings.master) return;
+        if (e.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || mc.player == null) return;
+
+        if (Settings.spawner.enabled) {
+            Render.draw(e, spawnerTargets(mc), Settings.spawner);
+        }
+        if (Settings.villager.enabled) {
+            Render.draw(e, villagerTargets(mc, e.getPartialTick()), Settings.villager);
+        }
     }
 
     @SubscribeEvent
     public static void onHud(RenderGuiOverlayEvent.Post e) {
-        if (!enabled || found.isEmpty()) return;
+        if (!Settings.master) return;
         if (e.getOverlay() != VanillaGuiOverlay.HOTBAR.type()) return;
         Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null) return;
+        if (mc.player == null || mc.level == null) return;
+        GuiGraphics g = e.getGuiGraphics();
 
-        List<Found> sorted = new ArrayList<>(found);
-        sorted.sort(Comparator.comparingDouble(f -> f.pos().distSqr(mc.player.blockPosition())));
-
-        int y = 10;
-        for (int i = 0; i < Math.min(8, sorted.size()); i++) {
-            Found f = sorted.get(i);
-            int dist = (int) Math.sqrt(f.pos().distSqr(mc.player.blockPosition()));
-            String line = f.type() + "  " + dist + "m  (" + f.pos().getX() + ", "
-                    + f.pos().getY() + ", " + f.pos().getZ() + ")";
-            e.getGuiGraphics().drawString(mc.font, line, 6, y, 0xFFFFFF);
-            y += 11;
+        if (Settings.spawner.enabled && Settings.spawner.hud) {
+            List<Target> l = spawnerTargets(mc);
+            int y = 10;
+            for (int i = 0; i < Math.min(8, l.size()); i++) {
+                Target t = l.get(i);
+                g.drawString(mc.font, t.label(), 6, y, Colors.rgb(t.type()));
+                y += 11;
+            }
         }
-    }
-
-    private static void box(BufferBuilder bb, Matrix4f m,
-                            float x0, float y0, float z0, float x1, float y1, float z1,
-                            float r, float g, float b) {
-        // bottom
-        line(bb, m, x0, y0, z0, x1, y0, z0, r, g, b);
-        line(bb, m, x1, y0, z0, x1, y0, z1, r, g, b);
-        line(bb, m, x1, y0, z1, x0, y0, z1, r, g, b);
-        line(bb, m, x0, y0, z1, x0, y0, z0, r, g, b);
-        // top
-        line(bb, m, x0, y1, z0, x1, y1, z0, r, g, b);
-        line(bb, m, x1, y1, z0, x1, y1, z1, r, g, b);
-        line(bb, m, x1, y1, z1, x0, y1, z1, r, g, b);
-        line(bb, m, x0, y1, z1, x0, y1, z0, r, g, b);
-        // verticals
-        line(bb, m, x0, y0, z0, x0, y1, z0, r, g, b);
-        line(bb, m, x1, y0, z0, x1, y1, z0, r, g, b);
-        line(bb, m, x1, y0, z1, x1, y1, z1, r, g, b);
-        line(bb, m, x0, y0, z1, x0, y1, z1, r, g, b);
-    }
-
-    private static void line(BufferBuilder bb, Matrix4f m,
-                             float x1, float y1, float z1, float x2, float y2, float z2,
-                             float r, float g, float b) {
-        bb.vertex(m, x1, y1, z1).color(r, g, b, 1f).endVertex();
-        bb.vertex(m, x2, y2, z2).color(r, g, b, 1f).endVertex();
+        if (Settings.villager.enabled && Settings.villager.hud) {
+            List<Target> l = villagerTargets(mc, 1f);
+            int w = g.guiWidth();
+            int y = 10;
+            for (int i = 0; i < Math.min(8, l.size()); i++) {
+                Target t = l.get(i);
+                g.drawString(mc.font, t.label(), w - mc.font.width(t.label()) - 6, y, Colors.rgb(t.type()));
+                y += 11;
+            }
+        }
     }
 }

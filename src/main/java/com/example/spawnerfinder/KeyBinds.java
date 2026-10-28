@@ -11,9 +11,12 @@ import org.lwjgl.glfw.GLFW;
 public class KeyBinds {
     public static final KeyMapping TOGGLE =
             new KeyMapping("key.spawnerfinder.toggle", GLFW.GLFW_KEY_K, "key.categories.misc");
+    public static final KeyMapping GUI =
+            new KeyMapping("key.spawnerfinder.gui", GLFW.GLFW_KEY_RIGHT_SHIFT, "key.categories.misc");
 
     @SubscribeEvent
     public static void register(RegisterKeyMappingsEvent e) {
         e.register(TOGGLE);
+        e.register(GUI);
     }
 }

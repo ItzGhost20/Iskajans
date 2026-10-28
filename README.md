@@ -1,12 +1,12 @@
-# Spawner Finder (Forge 1.20.1)
+# Spawner Finder client (Forge 1.20.1)
 
-Client-side mod: draws colored boxes around mob spawners through walls
-and lists the 8 nearest ones (type, distance, coords) on screen.
-Key K toggles it. For private/friendly servers only (with the admin's OK).
+Client-side mod with a control panel (Right Shift):
+- Spawner finder: boxes, tracers, labels, HUD list, mob filter, range
+- Villager finder: same options, filter by profession (+ wandering trader)
+- Every option has an on/off switch, settings are saved in config/spawnerfinder.properties
+- K = master on/off
 
-Build on GitHub (no PC needed):
-1. Create a GitHub repo and upload the contents of this folder (keep the .github folder).
-2. Open the Actions tab -> "Build mod" -> run it.
-3. Download the artifact "spawnerfinder-jar" and put the jar in .minecraft/mods.
+For private/friendly servers only (with the admin's OK).
 
-Local build: Gradle 8.1.1 + Java 17, run `gradle build`; the jar is in build/libs/.
+Build on GitHub: upload the contents of this folder (keep .github), Actions -> "Build mod" -> Run workflow -> download the artifact.
+Local build: Gradle 8.1.1 + Java 17, `gradle build`, jar in build/libs/.
