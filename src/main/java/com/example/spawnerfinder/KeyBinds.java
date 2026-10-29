@@ -13,10 +13,13 @@ public class KeyBinds {
             new KeyMapping("key.spawnerfinder.toggle", GLFW.GLFW_KEY_K, "key.categories.misc");
     public static final KeyMapping GUI =
             new KeyMapping("key.spawnerfinder.gui", GLFW.GLFW_KEY_RIGHT_SHIFT, "key.categories.misc");
+    public static final KeyMapping DIG =
+            new KeyMapping("key.spawnerfinder.dig", GLFW.GLFW_KEY_G, "key.categories.misc");
 
     @SubscribeEvent
     public static void register(RegisterKeyMappingsEvent e) {
         e.register(TOGGLE);
         e.register(GUI);
+        e.register(DIG);
     }
 }

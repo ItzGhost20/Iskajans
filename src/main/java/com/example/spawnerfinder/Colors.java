@@ -1,9 +1,33 @@
 package com.example.spawnerfinder;
 
+import java.util.List;
+
 public final class Colors {
     private Colors() {}
 
+    /** Types shown in the color picker even before they are seen in the world. */
+    public static final List<String> DEFAULT_TYPES = List.of(
+            "zombie", "skeleton", "spider", "cave_spider", "blaze", "silverfish",
+            "magma_cube", "creeper", "unknown",
+            "librarian", "cleric", "farmer", "armorer", "weaponsmith", "toolsmith",
+            "wandering_trader");
+
     public static float[] of(String t) {
+        Integer c = Settings.colors.get(t);
+        if (c != null) {
+            return new float[]{((c >> 16) & 255) / 255f, ((c >> 8) & 255) / 255f, (c & 255) / 255f};
+        }
+        return defaultOf(t);
+    }
+
+    public static int rgb(String t) {
+        Integer c = Settings.colors.get(t);
+        if (c != null) return c & 0xFFFFFF;
+        float[] f = defaultOf(t);
+        return ((int) (f[0] * 255) << 16) | ((int) (f[1] * 255) << 8) | (int) (f[2] * 255);
+    }
+
+    private static float[] defaultOf(String t) {
         return switch (t) {
             case "zombie" -> new float[]{0.3f, 1f, 0.3f};
             case "skeleton" -> new float[]{0.9f, 0.9f, 0.9f};
@@ -26,10 +50,5 @@ public final class Colors {
                         Math.max(0.35f, (h & 0xFF) / 255f)};
             }
         };
-    }
-
-    public static int rgb(String t) {
-        float[] c = of(t);
-        return ((int) (c[0] * 255) << 16) | ((int) (c[1] * 255) << 8) | (int) (c[2] * 255);
     }
 }

@@ -2,9 +2,11 @@ package com.example.spawnerfinder;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.npc.Villager;
@@ -25,7 +27,9 @@ import net.minecraftforge.fml.common.Mod;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.TreeSet;
 
 @Mod.EventBusSubscriber(modid = "spawnerfinder", value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
@@ -34,9 +38,14 @@ public class ClientEvents {
     public record Found(BlockPos pos, String type) {}
 
     static List<Found> found = new ArrayList<>();
+    static Set<Long> known = new HashSet<>();
     static int tickCounter = 0;
 
     // ================= Spawner finder =================
+
+    public static List<Found> foundList() {
+        return found;
+    }
 
     public static List<String> spawnerTypes() {
         return new ArrayList<>(new TreeSet<>(found.stream().map(Found::type).toList()));
@@ -56,6 +65,18 @@ public class ClientEvents {
         }
         out.sort(Comparator.comparingDouble(Target::dist));
         return out;
+    }
+
+    /** Copies the nearest spawner's coordinates to the clipboard. */
+    public static void copyNearest(Minecraft mc) {
+        List<Target> l = spawnerTargets(mc);
+        if (l.isEmpty() || mc.player == null) {
+            if (mc.player != null) mc.player.displayClientMessage(Component.literal("No spawner in range"), true);
+            return;
+        }
+        BlockPos p = BlockPos.containing(l.get(0).box().getCenter());
+        mc.keyboardHandler.setClipboard(p.getX() + " " + p.getY() + " " + p.getZ());
+        mc.player.displayClientMessage(Component.literal("Copied: " + p.getX() + " " + p.getY() + " " + p.getZ()), true);
     }
 
     private static void scanSpawners(Minecraft mc) {
@@ -81,6 +102,19 @@ public class ClientEvents {
                 }
             }
         }
+
+        // sound alert for newly seen spawners
+        Set<Long> now = new HashSet<>();
+        boolean fresh = false;
+        for (Found f : list) {
+            long k = f.pos().asLong();
+            now.add(k);
+            if (!known.contains(k)) fresh = true;
+        }
+        if (fresh && Settings.alertSound && Settings.spawner.enabled) {
+            mc.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.EXPERIENCE_ORB_PICKUP, 1.2f));
+        }
+        known = now;
         found = list;
     }
 
@@ -151,13 +185,20 @@ public class ClientEvents {
         while (KeyBinds.GUI.consumeClick()) {
             if (mc.screen == null && mc.player != null) mc.setScreen(new ControlPanel());
         }
-
-        if (!Settings.master || !Settings.spawner.enabled || mc.level == null || mc.player == null) {
-            if (!found.isEmpty()) found = new ArrayList<>();
-            return;
+        while (KeyBinds.DIG.consumeClick()) {
+            if (mc.screen == null && mc.player != null) AutoDig.toggle(mc);
         }
-        if (++tickCounter % 20 != 0) return;
-        scanSpawners(mc);
+
+        boolean scanning = Settings.master && (Settings.spawner.enabled || Settings.dig.enabled)
+                && mc.level != null && mc.player != null;
+        if (scanning && ++tickCounter % 20 == 0) {
+            scanSpawners(mc);
+        } else if (!scanning && !found.isEmpty()) {
+            found = new ArrayList<>();
+            known = new HashSet<>();
+        }
+
+        AutoDig.tick(mc);
     }
 
     @SubscribeEvent
@@ -173,6 +214,9 @@ public class ClientEvents {
         if (Settings.villager.enabled) {
             Render.draw(e, villagerTargets(mc, e.getPartialTick()), Settings.villager);
         }
+        if (AutoDig.active && Settings.dig.showPath) {
+            Render.drawPath(e, AutoDig.path, AutoDig.idx);
+        }
     }
 
     @SubscribeEvent
@@ -183,6 +227,9 @@ public class ClientEvents {
         if (mc.player == null || mc.level == null) return;
         GuiGraphics g = e.getGuiGraphics();
 
+        if (AutoDig.active) {
+            g.drawCenteredString(mc.font, "AutoDig: " + AutoDig.status, g.guiWidth() / 2, 4, 0x55FF55);
+        }
         if (Settings.spawner.enabled && Settings.spawner.hud) {
             List<Target> l = spawnerTargets(mc);
             int y = 10;

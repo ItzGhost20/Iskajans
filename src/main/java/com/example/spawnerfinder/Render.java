@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.client.event.RenderLevelStageEvent;
@@ -34,7 +35,8 @@ public final class Render {
         BufferBuilder bb = Tesselator.getInstance().getBuilder();
 
         // translucent fill
-        if (cfg.boxes) {
+        if (cfg.boxes && Settings.fillAlpha > 0) {
+            float alpha = Settings.fillAlpha / 100f;
             RenderSystem.disableCull();
             bb.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
             for (Target t : targets) {
@@ -43,7 +45,7 @@ public final class Render {
                 fillBox(bb, m,
                         (float) (b.minX - cam.x), (float) (b.minY - cam.y), (float) (b.minZ - cam.z),
                         (float) (b.maxX - cam.x), (float) (b.maxY - cam.y), (float) (b.maxZ - cam.z),
-                        c[0], c[1], c[2], 0.20f);
+                        c[0], c[1], c[2], alpha);
             }
             Tesselator.getInstance().end();
             RenderSystem.enableCull();
@@ -51,7 +53,7 @@ public final class Render {
 
         // outlines + tracers
         if (cfg.boxes || cfg.tracers) {
-            RenderSystem.lineWidth(2.5f);
+            RenderSystem.lineWidth(Settings.lineWidth);
             bb.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
             Vector3f lv = e.getCamera().getLookVector();
             for (Target t : targets) {
@@ -78,7 +80,7 @@ public final class Render {
                 double dy = b.maxY + 0.5 - cam.y;
                 double dz = (b.minZ + b.maxZ) / 2.0 - cam.z;
                 double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                float s = (float) Math.max(0.025, dist * 0.0035);
+                float s = (float) Math.max(0.025, dist * 0.0035) * (Settings.labelScale / 100f);
 
                 ps.pushPose();
                 ps.translate(dx, dy, dz);
@@ -92,6 +94,33 @@ public final class Render {
             buf.endBatch();
         }
 
+        RenderSystem.enableDepthTest();
+    }
+
+    /** Draws the AutoDig route as a green polyline through the cell centers. */
+    public static void drawPath(RenderLevelStageEvent e, List<BlockPos> path, int from) {
+        if (path.size() - from < 2) return;
+        Vec3 cam = e.getCamera().getPosition();
+        Matrix4f m = e.getPoseStack().last().pose();
+
+        RenderSystem.disableDepthTest();
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.setShader(GameRenderer::getPositionColorShader);
+        RenderSystem.lineWidth(3f);
+
+        BufferBuilder bb = Tesselator.getInstance().getBuilder();
+        bb.begin(VertexFormat.Mode.DEBUG_LINES, DefaultVertexFormat.POSITION_COLOR);
+        int end = Math.min(path.size(), from + 300);
+        for (int i = Math.max(0, from); i < end - 1; i++) {
+            BlockPos a = path.get(i), b = path.get(i + 1);
+            line(bb, m,
+                    (float) (a.getX() + 0.5 - cam.x), (float) (a.getY() + 0.5 - cam.y), (float) (a.getZ() + 0.5 - cam.z),
+                    (float) (b.getX() + 0.5 - cam.x), (float) (b.getY() + 0.5 - cam.y), (float) (b.getZ() + 0.5 - cam.z),
+                    0.2f, 1f, 0.4f, 1f);
+        }
+        Tesselator.getInstance().end();
+        RenderSystem.lineWidth(1f);
         RenderSystem.enableDepthTest();
     }
 
