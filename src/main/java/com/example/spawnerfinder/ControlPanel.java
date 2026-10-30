@@ -288,8 +288,9 @@ public class ControlPanel extends Screen {
         g.drawString(font, "AUTODIG", x, y, Ui.ACCENT, false);
         boolean recent = !AutoDig.active && !AutoDig.lastStop.isEmpty()
                 && System.currentTimeMillis() - AutoDig.lastStopTime < 60000;
-        int sc = AutoDig.active ? Ui.GOOD : (recent ? Ui.DANGER : Ui.MUTED);
-        String st = AutoDig.active ? AutoDig.status : (recent ? "stopped: " + AutoDig.lastStop : "idle");
+        int sc = AutoDig.active ? Ui.GOOD : (recent ? (AutoDig.finished ? Ui.GOOD : Ui.DANGER) : Ui.MUTED);
+        String st = AutoDig.active ? AutoDig.status
+                : (recent ? (AutoDig.finished ? AutoDig.lastStop : "stopped: " + AutoDig.lastStop) : "idle");
         int yy = y + 14;
         for (String line : wrap(st, maxW)) {
             g.drawString(font, line, x, yy, sc, false);

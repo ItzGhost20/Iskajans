@@ -3,9 +3,11 @@ package com.example.spawnerfinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.Input;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.block.Blocks;
@@ -17,21 +19,20 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * AutoDig: tunnels to the nearest spawner, mines it with a silk touch pickaxe, then goes on to the next one
- * until no spawner is left in range. Every other block on the way is mined with a regular pickaxe.
+ * AutoDig. The cycle:
+ *   1. pick the NEAREST spawner and LOCK it - it is never swapped for another one while it is being worked on
+ *   2. tunnel to it (normal pickaxe for blocks), mine it with a silk touch pickaxe
+ *   3. pick the next nearest one, lock it, repeat
+ *   4. when none is left: alert sound + on-screen message
  *
- * A problem with one spawner (no route, protected block, too many re-plans) only skips THAT spawner - the run
- * goes on with the next. It really stops only when: nothing is left, you press a movement key, health is
- * below the limit, or a tool is missing.
- *
- * It never touches containers or any block with block-entity data (chests, furnaces, signs, ...) and does not
- * try to get around blocks that refuse to break (claims / protection).
+ * The locked spawner is only dropped when it is gone, its chunk never loads, there is no route at all after
+ * several tries, a block refuses to break (protection), or there was no progress for 60 seconds.
+ * It never touches containers or any block with block-entity data and does not try to get around protection.
  */
 @Mod.EventBusSubscriber(modid = "spawnerfinder", value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class AutoDig {
@@ -41,6 +42,7 @@ public final class AutoDig {
 
     // shown in the panel / HUD
     public static boolean active = false;
+    public static boolean finished = false;     // true when the run ended because nothing was left
     public static String status = "idle";
     public static String lastStop = "";
     public static long lastStopTime = 0;
@@ -49,13 +51,15 @@ public final class AutoDig {
     public static int mined = 0, unreachable = 0, failed = 0, remaining = 0;
 
     private static Phase phase = Phase.IDLE;
-    private static BlockPos target;
+    private static BlockPos target;             // the LOCKED spawner
+    private static String targetType = "";
     private static Set<Long> goals = Set.of();
     private static boolean partial;
     private static final Set<Long> blocked = new HashSet<>();
     private static final Set<Long> skipTargets = new HashSet<>();
     private static BlockPos breakingPos;
-    private static int breakTicks, targetReplans, targetTicks, targetFails;
+    private static int breakTicks, targetReplans, targetFails, planFails, planWait, unloadedTicks;
+    private static int ticksSinceProgress;
     private static int stuck, pickupTicks, spawnerTicks, idleTicks, manualTicks;
     private static Vec3 lastPos = Vec3.ZERO;
     private static float lastHealth = 20f;
@@ -79,15 +83,16 @@ public final class AutoDig {
             return;
         }
         active = true;
+        finished = false;
         skipTargets.clear();
         mined = 0;
         unreachable = 0;
         failed = 0;
         idleTicks = 0;
         manualTicks = 0;
+        planWait = 0;
         lastHealth = mc.player.getHealth();
         lastPos = mc.player.position();
-        target = null;
         beginNext(mc);
         status = "planning...";
         msg(mc, "started");
@@ -106,31 +111,41 @@ public final class AutoDig {
         lastStop = reason;
         lastStopTime = System.currentTimeMillis();
         if (mc.gameMode != null) mc.gameMode.stopDestroyBlock();
-        if (was) msg(mc, "stopped: " + reason);
+        if (was) msg(mc, finished ? reason : "stopped: " + reason);
     }
 
     private static void msg(Minecraft mc, String s) {
         if (mc.player != null) mc.player.displayClientMessage(Component.literal("[AutoDig] " + s), false);
     }
 
-    /** Resets everything that belongs to one spawner and goes back to choosing the next one. */
+    /** Clears everything that belongs to one spawner and goes back to choosing the next one. */
     private static void beginNext(Minecraft mc) {
         target = null;
+        targetType = "";
         path = List.of();
         idx = 0;
         phase = Phase.PLANNING;
         breakingPos = null;
         breakTicks = 0;
         targetReplans = 0;
-        targetTicks = 0;
         targetFails = 0;
+        planFails = 0;
+        planWait = 0;
+        unloadedTicks = 0;
+        ticksSinceProgress = 0;
         stuck = 0;
         blocked.clear();
         partial = false;
         if (mc.gameMode != null) mc.gameMode.stopDestroyBlock();
     }
 
-    /** This spawner cannot be done - skip it and go on with the next one. */
+    /** Real progress was made (a step, a broken block): resets the "no progress" and re-plan counters. */
+    private static void progress() {
+        ticksSinceProgress = 0;
+        targetReplans = 0;
+    }
+
+    /** This spawner cannot be done - skip it and lock the next one. */
     private static void giveUp(Minecraft mc, String why) {
         if (target != null) {
             skipTargets.add(target.asLong());
@@ -140,23 +155,35 @@ public final class AutoDig {
         beginNext(mc);
     }
 
+    /** Route again to the SAME spawner (the lock stays). Only gives up after many tries without progress. */
     private static void replan(Minecraft mc, String why) {
-        if (++targetReplans > 12) {
-            giveUp(mc, why);
+        if (++targetReplans > 10) {
+            giveUp(mc, why + ", no progress");
             return;
         }
         phase = Phase.PLANNING;
+        planWait = 5;
         breakingPos = null;
         breakTicks = 0;
         partial = false;
-        status = "re-planning: " + why;
+        status = "re-routing: " + why;
     }
 
     private static void finish(Minecraft mc) {
+        finished = true;
         String extra = "";
         if (unreachable > 0) extra += ", " + unreachable + " unreachable";
         if (failed > 0) extra += ", " + failed + " skipped";
-        stop(mc, "done: " + mined + " spawner(s) mined" + extra);
+        alertDone(mc);
+        stop(mc, "No spawners left to mine (" + mined + " mined" + extra + ")");
+    }
+
+    private static void alertDone(Minecraft mc) {
+        mc.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.PLAYER_LEVELUP, 1.0f));
+        mc.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.EXPERIENCE_ORB_PICKUP, 0.8f));
+        mc.gui.setTitle(Component.literal("No spawners left to mine"));
+        mc.gui.setSubtitle(Component.literal(mined + " spawner(s) mined"));
+        mc.gui.setTimes(10, 100, 20);
     }
 
     // ---------------------------------------------------------------- tick
@@ -188,8 +215,8 @@ public final class AutoDig {
         }
         lastHealth = p.getHealth();
 
-        if (target != null && phase != Phase.PLANNING && ++targetTicks > 12000) {
-            giveUp(mc, "took too long");
+        if (target != null && ++ticksSinceProgress > 1200) {
+            giveUp(mc, "no progress for 60 seconds");
             return;
         }
 
@@ -230,55 +257,89 @@ public final class AutoDig {
         in.jumping = wantJump;
     }
 
-    // ---------------------------------------------------------------- planning (the brain)
+    // ---------------------------------------------------------------- planning
 
     private static void plan(Minecraft mc) {
+        if (planWait > 0) {
+            planWait--;
+            return;
+        }
         LocalPlayer p = mc.player;
         BlockPos start = p.blockPosition();
         double r2 = (double) Settings.dig.maxRadius * Settings.dig.maxRadius;
 
-        List<ClientEvents.Found> cands = new ArrayList<>();
+        // spawners that are still to do (skipped ones and out-of-range ones do not count)
+        ClientEvents.Found nearest = null;
+        double nearestD = Double.MAX_VALUE;
+        int count = 0;
         for (ClientEvents.Found f : ClientEvents.foundList()) {
             if (skipTargets.contains(f.pos().asLong())) continue;
             if (!Settings.dig.filter.equals("ALL") && !f.type().equals(Settings.dig.filter)) continue;
             double dx = f.pos().getX() - start.getX();
             double dz = f.pos().getZ() - start.getZ();
             if (dx * dx + dz * dz > r2) continue;
-            cands.add(f);
+            count++;
+            double d = f.pos().distSqr(start);
+            if (d < nearestD) {
+                nearestD = d;
+                nearest = f;
+            }
         }
-        // nearest first; the spawner we are already working on stays first
-        final BlockPos cur = target;
-        cands.sort(Comparator.comparingDouble((ClientEvents.Found f) ->
-                f.pos().equals(cur) ? -1.0 : f.pos().distSqr(start)));
-        remaining = cands.size();
+        remaining = count;
 
-        if (cands.isEmpty()) {
-            // spawners of newly loaded chunks show up within a few seconds - look around before giving up
-            if (++idleTicks < 80) {
-                status = "looking for more spawners...";
+        // 1) no lock yet: take the nearest spawner and LOCK it
+        if (target == null) {
+            if (nearest == null) {
+                // spawners of newly loaded chunks show up within a few seconds - look around before finishing
+                if (++idleTicks < 80) {
+                    status = "looking for more spawners...";
+                    return;
+                }
+                finish(mc);
                 return;
             }
-            finish(mc);
-            return;
-        }
-        idleTicks = 0;
-
-        ClientEvents.Found first = cands.get(0);
-        Pathfinder.Plan pl = Pathfinder.find(mc, start, first.pos(), blocked);
-        if (pl == null) {
-            skipTargets.add(first.pos().asLong());
-            unreachable++;
-            msg(mc, "no route to " + first.pos().getX() + " " + first.pos().getY() + " " + first.pos().getZ()
-                    + ", trying the next one");
-            if (first.pos().equals(cur)) beginNext(mc);
-            status = "no route, trying next";
-            return;
+            idleTicks = 0;
+            target = nearest.pos();
+            targetType = nearest.type();
+            planFails = 0;
+            targetReplans = 0;
+            ticksSinceProgress = 0;
+            msg(mc, "locked on " + targetType + " spawner at " + target.getX() + " " + target.getY() + " "
+                    + target.getZ() + " (" + (int) Math.sqrt(nearestD) + " blocks)");
         }
 
-        if (cur == null || !cur.equals(first.pos())) {
+        // 2) the locked spawner must still exist
+        if (!mc.level.hasChunkAt(target)) {
+            if (++unloadedTicks > 200) giveUp(mc, "its chunk is not loaded");
+            else status = "waiting for the chunk to load...";
+            return;
+        }
+        unloadedTicks = 0;
+        if (!mc.level.getBlockState(target).is(Blocks.SPAWNER)) {
+            skipTargets.add(target.asLong());
+            msg(mc, "that spawner is gone (someone else got it?)");
             beginNext(mc);
-            target = first.pos();
+            return;
         }
+
+        // 3) route to the locked spawner (the lock never changes here)
+        Pathfinder.Plan pl = Pathfinder.find(mc, start, target, blocked);
+        if (pl == null) {
+            if (++planFails >= 4) {
+                unreachable++;
+                skipTargets.add(target.asLong());
+                msg(mc, "no route to " + target.getX() + " " + target.getY() + " " + target.getZ()
+                        + ", skipping it");
+                beginNext(mc);
+            } else {
+                blocked.clear();
+                planWait = 20;
+                status = "no route yet, retrying (" + planFails + "/4)";
+            }
+            return;
+        }
+        planFails = 0;
+
         path = pl.path();
         idx = 0;
         goals = pl.goals();
@@ -287,7 +348,7 @@ public final class AutoDig {
         breakingPos = null;
         breakTicks = 0;
         stuck = 0;
-        status = "digging to " + target.getX() + " " + target.getY() + " " + target.getZ()
+        status = "digging to " + targetType + " " + target.getX() + " " + target.getY() + " " + target.getZ()
                 + " (" + (path.size() - 1) + " steps" + (partial ? ", more after" : "") + ")";
     }
 
@@ -297,9 +358,9 @@ public final class AutoDig {
         LocalPlayer p = mc.player;
         BlockPos feet = p.blockPosition();
 
-        if (target != null && !mc.level.getBlockState(target).is(Blocks.SPAWNER)) {
+        if (target != null && mc.level.hasChunkAt(target) && !mc.level.getBlockState(target).is(Blocks.SPAWNER)) {
             skipTargets.add(target.asLong());
-            msg(mc, "spawner is gone (someone else got it?)");
+            msg(mc, "that spawner is gone (someone else got it?)");
             beginNext(mc);
             return;
         }
@@ -308,6 +369,7 @@ public final class AutoDig {
             phase = Phase.SPAWNER;
             spawnerTicks = 0;
             breakingPos = null;
+            progress();
             status = "at the spawner";
             return;
         }
@@ -318,7 +380,10 @@ public final class AutoDig {
                 onPath = true;
                 if (i > idx) {
                     Vec3 c = Vec3.atBottomCenterOf(path.get(i));
-                    if (Math.hypot(c.x - p.getX(), c.z - p.getZ()) < 0.3) idx = i;
+                    if (Math.hypot(c.x - p.getX(), c.z - p.getZ()) < 0.3) {
+                        idx = i;
+                        progress();
+                    }
                 }
             }
         }
@@ -328,7 +393,7 @@ public final class AutoDig {
         }
         if (idx >= path.size() - 1) {
             if (partial) {
-                phase = Phase.PLANNING; // far target: plan the next stretch from here
+                phase = Phase.PLANNING; // far target: plan the next stretch from here, same lock
                 status = "extending the route...";
             } else {
                 replan(mc, "path ended");
@@ -352,6 +417,7 @@ public final class AutoDig {
         }
 
         // way is clear: walk to the next cell
+        if (breakingPos != null) progress(); // the block we were mining is gone
         breakingPos = null;
         Vec3 ctr = Vec3.atBottomCenterOf(nxt);
         aim(p, new Vec3(ctr.x, p.getEyeY(), ctr.z), Settings.dig.rotSpeed);
@@ -360,7 +426,7 @@ public final class AutoDig {
         double hd = Math.hypot(ctr.x - p.getX(), ctr.z - p.getZ());
         wantForward = yawErr < 30f && hd > 0.12;
         wantJump = nxt.getY() > feet.getY() && p.onGround();
-        status = "walking (" + (path.size() - 1 - idx) + " steps left)";
+        status = "walking to " + targetType + " (" + (path.size() - 1 - idx) + " steps left)";
 
         // stuck detection
         if (wantForward && p.position().distanceToSqr(lastPos) < 0.0004) stuck++;
@@ -427,10 +493,12 @@ public final class AutoDig {
             skipTargets.add(target.asLong());
             if (spawnerTicks > 0) {
                 mined++;
+                if (remaining > 0) remaining--;
                 msg(mc, "spawner mined (" + mined + " so far)");
                 phase = Phase.PICKUP;
                 pickupTicks = 0;
                 breakingPos = null;
+                ticksSinceProgress = 0;
                 mc.gameMode.stopDestroyBlock();
                 status = "collecting the spawner";
             } else {
@@ -459,10 +527,11 @@ public final class AutoDig {
             giveUp(mc, "spawner will not break - protected?");
             return;
         }
+        ticksSinceProgress = 0; // mining the spawner is progress
         Vec3 eye = p.getEyePosition();
         Direction d = Direction.getNearest(eye.x - center.x, eye.y - center.y, eye.z - center.z);
         if (mc.gameMode.continueDestroyBlock(target, d)) p.swing(InteractionHand.MAIN_HAND);
-        status = "mining the spawner (silk touch)";
+        status = "mining the " + targetType + " spawner (silk touch)";
     }
 
     private static void pickup(Minecraft mc) {
@@ -476,10 +545,11 @@ public final class AutoDig {
         }
         if (pickupTicks >= 25) {
             if (Settings.dig.continuous) {
-                beginNext(mc);
-                status = "next spawner...";
+                beginNext(mc); // the lock is released here - the next nearest spawner gets locked
+                status = "looking for the next spawner...";
             } else {
-                stop(mc, "done: " + mined + " spawner(s) mined");
+                finished = true;
+                stop(mc, "Done: " + mined + " spawner(s) mined");
             }
         }
     }
