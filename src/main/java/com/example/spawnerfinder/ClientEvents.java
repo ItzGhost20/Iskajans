@@ -229,6 +229,10 @@ public class ClientEvents {
 
         if (AutoDig.active) {
             g.drawCenteredString(mc.font, "AutoDig: " + AutoDig.status, g.guiWidth() / 2, 4, 0x55FF55);
+            g.drawCenteredString(mc.font, "mined " + AutoDig.mined + "  |  left " + AutoDig.remaining
+                    + "  |  skipped " + (AutoDig.failed + AutoDig.unreachable), g.guiWidth() / 2, 15, 0xCCCCCC);
+        } else if (!AutoDig.lastStop.isEmpty() && System.currentTimeMillis() - AutoDig.lastStopTime < 10000) {
+            g.drawCenteredString(mc.font, "AutoDig stopped: " + AutoDig.lastStop, g.guiWidth() / 2, 4, 0xFF5555);
         }
         if (Settings.spawner.enabled && Settings.spawner.hud) {
             List<Target> l = spawnerTargets(mc);

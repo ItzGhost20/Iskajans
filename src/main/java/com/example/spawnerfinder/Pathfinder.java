@@ -22,30 +22,36 @@ import java.util.Set;
 /**
  * The "brain": weighted A* over the player's feet cell. Moves are 4 horizontal directions, each
  * optionally one block up or down (stairs). Blocks in the way are allowed (they get mined) but cost extra.
- * Mode SHORTEST = cheapest in steps (nearest route first); mode FASTEST = estimated time including mining.
+ * Mode SHORTEST = fewest steps (nearest route first); mode FASTEST = estimated time including mining.
+ *
+ * If the search budget runs out before the goal, a PARTIAL plan to the most promising cell is returned;
+ * AutoDig simply plans again from there, so far targets are reached step by step.
  */
 public final class Pathfinder {
     private Pathfinder() {}
 
-    public record Plan(List<BlockPos> path, double cost, Set<Long> goals) {}
+    public record Plan(List<BlockPos> path, double cost, Set<Long> goals, boolean partial) {}
 
     private static final class Node {
         final long key;
         final BlockPos pos;
         final Node parent;
         final double g, f;
+        final int h;
 
-        Node(BlockPos pos, Node parent, double g, double f) {
+        Node(BlockPos pos, Node parent, double g, double f, int h) {
             this.key = pos.asLong();
             this.pos = pos;
             this.parent = parent;
             this.g = g;
             this.f = f;
+            this.h = h;
         }
     }
 
     private static final int[][] DIRS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    private static final int MAX_NODES = 15000;
+    private static final int MAX_NODES = 60000;
+    private static final long MAX_NANOS = 250_000_000L; // 0.25 s per search
 
     /** Cells that must be free (air or passable) to go from cur to nxt. */
     public static List<BlockPos> clearCells(BlockPos cur, BlockPos nxt) {
@@ -74,7 +80,7 @@ public final class Pathfinder {
 
     private static boolean harmful(BlockState s) {
         return s.is(Blocks.FIRE) || s.is(Blocks.SOUL_FIRE) || s.is(Blocks.SWEET_BERRY_BUSH)
-                || s.is(Blocks.POWDER_SNOW) || s.is(Blocks.COBWEB) || s.is(Blocks.WITHER_ROSE);
+                || s.is(Blocks.POWDER_SNOW) || s.is(Blocks.WITHER_ROSE);
     }
 
     public static Plan find(Minecraft mc, BlockPos start, BlockPos spawner, Set<Long> blocked) {
@@ -82,6 +88,7 @@ public final class Pathfinder {
         DigTools.Ctx ctx = new DigTools.Ctx(mc);
         boolean fastest = Settings.dig.mode == 1;
         double minStep = fastest ? 0.23 : 1.0;
+        double weight = fastest ? 3.0 : 1.3; // weighted A*: much faster, slightly longer routes
 
         Set<Long> goals = new HashSet<>();
         for (int[] d : DIRS) {
@@ -91,24 +98,25 @@ public final class Pathfinder {
         }
 
         int radius = Settings.dig.maxRadius + 8;
-        PriorityQueue<Node> open = new PriorityQueue<>(Comparator.comparingDouble((Node n) -> n.f));
+        PriorityQueue<Node> open = new PriorityQueue<>(
+                Comparator.comparingDouble((Node n) -> n.f).thenComparingInt(n -> n.h));
         Map<Long, Node> best = new HashMap<>();
-        Node s0 = new Node(start, null, 0, h(start, spawner) * minStep);
+        int h0 = h(start, spawner);
+        Node s0 = new Node(start, null, 0, h0 * minStep * weight, h0);
         open.add(s0);
         best.put(s0.key, s0);
 
+        Node closest = s0;
+        long deadline = System.nanoTime() + MAX_NANOS;
         int nodes = 0;
         while (!open.isEmpty() && nodes < MAX_NODES) {
+            if ((nodes & 127) == 0 && System.nanoTime() > deadline) break;
             Node n = open.poll();
             if (best.get(n.key) != n) continue; // stale entry
             nodes++;
 
-            if (goals.contains(n.key)) {
-                List<BlockPos> path = new ArrayList<>();
-                for (Node c = n; c != null; c = c.parent) path.add(c.pos);
-                Collections.reverse(path);
-                return new Plan(path, n.g, goals);
-            }
+            if (goals.contains(n.key)) return new Plan(chain(n), n.g, goals, false);
+            if (n.h < closest.h || (n.h == closest.h && n.g < closest.g)) closest = n;
 
             for (int[] d : DIRS) {
                 for (int dy = -1; dy <= 1; dy++) {
@@ -119,13 +127,26 @@ public final class Pathfinder {
                     double ng = n.g + c;
                     Node ex = best.get(t.asLong());
                     if (ex != null && ex.g <= ng) continue;
-                    Node nn = new Node(t, n, ng, ng + h(t, spawner) * minStep);
+                    int th = h(t, spawner);
+                    Node nn = new Node(t, n, ng, ng + th * minStep * weight, th);
                     best.put(nn.key, nn);
                     open.add(nn);
                 }
             }
         }
+
+        // budget used up (or no route): go as far as promising, then plan again from there
+        if (closest != s0 && closest.h <= h0 - 3) {
+            return new Plan(chain(closest), closest.g, goals, true);
+        }
         return null;
+    }
+
+    private static List<BlockPos> chain(Node n) {
+        List<BlockPos> path = new ArrayList<>();
+        for (Node c = n; c != null; c = c.parent) path.add(c.pos);
+        Collections.reverse(path);
+        return path;
     }
 
     private static int h(BlockPos pos, BlockPos sp) {
@@ -151,6 +172,7 @@ public final class Pathfinder {
             BlockState s = lv.getBlockState(c);
             if (!s.getFluidState().isEmpty()) return -1;
             if (harmful(s)) return -1;
+            if (s.is(Blocks.COBWEB)) cost += fastest ? 1.0 : 0.5; // slow, but spider spawners are wrapped in it
 
             // never open a tunnel next to lava, discourage water
             for (Direction dir : Direction.values()) {

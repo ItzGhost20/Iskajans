@@ -26,16 +26,18 @@ public class Settings {
 
     /** AutoDig configuration. */
     public static class Dig {
-        public boolean enabled = false;      // feature switch, OFF by default
-        public int mode = 0;                 // 0 = shortest path, 1 = fastest (time based)
-        public boolean continuous = true;    // go on to the next spawner after one is mined
-        public boolean bestTool = false;     // false = pickaxe only, true = any digging tool
-        public boolean protectTools = true;  // do not use tools about to break
+        public boolean enabled = false;       // feature switch, OFF by default
+        public int mode = 0;                  // 0 = shortest path, 1 = fastest (time based)
+        public boolean continuous = true;     // keep going until no spawner is left
+        public boolean bestTool = false;      // false = pickaxe only, true = any digging tool
+        public boolean protectTools = true;   // do not use tools about to break
         public boolean showPath = true;
+        public boolean stopOnDamage = false;  // off: mobs near a spawner must not end the run
+        public boolean stopOnMove = true;     // stop when YOU press a movement key
         public String filter = "ALL";
-        public int rotSpeed = 35;            // degrees per tick
-        public int maxRadius = 96;           // blocks
-        public int minHealth = 8;            // stop below this (half hearts)
+        public int rotSpeed = 35;             // degrees per tick
+        public int maxRadius = 256;           // blocks
+        public int minHealth = 6;             // stop below this (half hearts)
     }
 
     public static boolean master = true;
@@ -81,9 +83,11 @@ public class Settings {
         dig.bestTool = bool(p, "dig.bestTool", dig.bestTool);
         dig.protectTools = bool(p, "dig.protectTools", dig.protectTools);
         dig.showPath = bool(p, "dig.showPath", dig.showPath);
+        dig.stopOnDamage = bool(p, "dig.stopOnDamage", dig.stopOnDamage);
+        dig.stopOnMove = bool(p, "dig.stopOnMove", dig.stopOnMove);
         dig.filter = p.getProperty("dig.filter", dig.filter);
         dig.rotSpeed = num(p, "dig.rotSpeed", dig.rotSpeed, 5, 90);
-        dig.maxRadius = num(p, "dig.maxRadius", dig.maxRadius, 16, 256);
+        dig.maxRadius = num(p, "dig.maxRadius", dig.maxRadius, 16, 512);
         dig.minHealth = num(p, "dig.minHealth", dig.minHealth, 1, 19);
 
         colors.clear();
@@ -113,6 +117,8 @@ public class Settings {
         p.setProperty("dig.bestTool", String.valueOf(dig.bestTool));
         p.setProperty("dig.protectTools", String.valueOf(dig.protectTools));
         p.setProperty("dig.showPath", String.valueOf(dig.showPath));
+        p.setProperty("dig.stopOnDamage", String.valueOf(dig.stopOnDamage));
+        p.setProperty("dig.stopOnMove", String.valueOf(dig.stopOnMove));
         p.setProperty("dig.filter", dig.filter);
         p.setProperty("dig.rotSpeed", String.valueOf(dig.rotSpeed));
         p.setProperty("dig.maxRadius", String.valueOf(dig.maxRadius));
